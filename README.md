@@ -1,14 +1,15 @@
 # canvascli
 
-A command-line tool for downloading [Canvas LMS](https://www.instructure.com/canvas) course content and combining it into a single PDF.
+Download **everything** from a [Canvas LMS](https://www.instructure.com/canvas) course in one shot.
 
-Select a course, and canvascli will download all modules (pages, files, assignments, discussions, quizzes) and course files, convert everything to PDF, and merge it into one document.
+Useful for archiving courses before content disappears at the end of a semester, or when you just want your files without fighting Canvas's clunky web interface. Pick a course, and canvascli pulls down all modules (pages, files, assignments, discussions, quizzes) and course files, keeping the original files intact. It can also convert everything to PDF and merge it into a single document for easy offline reading.
 
 ## Features
 
+- **Downloads everything** &mdash; all modules, all files, all content types in one go
+- **Keeps originals** &mdash; raw files stay intact alongside any generated PDFs
 - **Interactive course picker** with favorites shown first
 - **Parallel downloads** for fast retrieval (8 threads)
-- **Broad content support** &mdash; pages, files, assignments, discussions, quizzes, external links
 - **Automatic PDF conversion** &mdash; HTML, images, Office docs, text/code files
 - **Duplicate detection** &mdash; deduplicates files across modules and removes duplicate pages in the final PDF
 - **Smart handling of large courses** &mdash; prompts to select/exclude large modules before combining
