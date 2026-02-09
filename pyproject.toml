@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "canvascli"
+version = "0.1.0"
+description = "CLI tool for downloading Canvas LMS course content and converting to PDF"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "ETM-Code" }
+]
+dependencies = [
+    "requests>=2.31.0",
+    "questionary>=2.0.0",
+    "weasyprint>=60.0",
+    "pypdf>=3.17.0",
+    "Pillow>=10.0.0",
+    "markdown>=3.5.0",
+    "beautifulsoup4>=4.12.0",
+    "python-docx>=1.0.0",
+    "openpyxl>=3.1.0",
+    "python-pptx>=0.6.0",
+    "rich>=13.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ETM-Code/canvascli"
+Repository = "https://github.com/ETM-Code/canvascli"
+Issues = "https://github.com/ETM-Code/canvascli/issues"
+
+[project.scripts]
+canvascli = "canvascli.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["canvascli"]

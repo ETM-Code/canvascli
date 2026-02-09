@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Output & data
+canvas_download/
+*.pdf
+
+# Fetched docs
+.claude_docs/
+developerdocs.instructure.com_*/
+
+# Config (contains API tokens)
+.env
