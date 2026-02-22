@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
-from .canvas_api import CanvasAPI
+from canvas_api import CanvasAPI
 
 # Number of parallel download threads
 MAX_WORKERS = 8
@@ -29,11 +29,10 @@ class DownloadedItem:
 
 def sanitize_filename(name: str) -> str:
     """Convert a string to a safe filename."""
-    # Remove or replace problematic characters
     name = re.sub(r'[<>:"/\\|?*]', '_', name)
     name = re.sub(r'\s+', ' ', name)
     name = name.strip('. ')
-    return name[:200]  # Limit length
+    return name[:200]
 
 
 class CourseDownloader:
@@ -45,9 +44,9 @@ class CourseDownloader:
         self.output_dir = output_dir
         self.console = Console()
         self.downloaded_items: list[DownloadedItem] = []
-        self._downloaded_file_ids: set[int] = set()  # Track by file ID for O(1) dedup
-        self._skipped_items: list[str] = []  # Track skipped items for summary
-        self._lock = Lock()  # Thread safety for shared state
+        self._downloaded_file_ids: set[int] = set()
+        self._skipped_items: list[str] = []
+        self._lock = Lock()
 
     def _add_downloaded_item(self, item: DownloadedItem, file_id: int | None = None) -> None:
         """Thread-safe add of downloaded item."""
@@ -77,17 +76,12 @@ class CourseDownloader:
     def download_all(self) -> list[DownloadedItem]:
         """Download all content from modules and files."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Download modules content
         self._download_modules()
-
-        # Download course files
         self._download_files()
 
-        # Show summary of skipped items
         if self._skipped_items:
             self.console.print(f"\n[yellow]Skipped {len(self._skipped_items)} items (not accessible):[/yellow]")
-            for item in self._skipped_items[:5]:  # Show first 5
+            for item in self._skipped_items[:5]:
                 self.console.print(f"  [dim]- {item}[/dim]")
             if len(self._skipped_items) > 5:
                 self.console.print(f"  [dim]... and {len(self._skipped_items) - 5} more[/dim]")
@@ -105,7 +99,6 @@ class CourseDownloader:
 
         self.console.print(f"Found {len(modules)} modules")
 
-        # Collect all items with their module names
         all_items = []
         for module in modules:
             module_name = module.get("name", "Untitled Module")
@@ -138,7 +131,6 @@ class CourseDownloader:
 
                 for future in as_completed(futures):
                     progress.advance(task)
-                    # Exceptions are logged inside _download_module_item
 
     def _download_module_item(self, item: dict, module_name: str) -> None:
         """Download a single module item."""
@@ -178,12 +170,10 @@ class CourseDownloader:
                     page_body = page.get("body", "")
                     page_title = page.get("title", title)
 
-                    # Extract and download linked files from the page
                     self._extract_and_download_linked_files(
                         page_body, module_dir, module_name
                     )
 
-                    # Also save the page HTML
                     html_content = self._wrap_html(page_body, page_title)
                     dest = module_dir / f"{safe_title}.html"
                     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -239,7 +229,6 @@ class CourseDownloader:
                         module_name=module_name,
                     ))
                 except Exception:
-                    # Quizzes may not be accessible (permissions, unpublished, etc.)
                     self._add_skipped_item(f"Quiz: {title}")
 
             elif item_type == "ExternalUrl":
@@ -257,11 +246,9 @@ class CourseDownloader:
                 ))
 
             elif item_type == "SubHeader":
-                # SubHeaders are just organizational, skip them
                 pass
 
         except Exception:
-            # Errors logged, don't spam console in parallel mode
             self._add_skipped_item(f"{item_type}: {title}")
 
     def _download_files(self) -> None:
@@ -271,7 +258,6 @@ class CourseDownloader:
         try:
             files = self.api.get_files(self.course_id)
         except Exception as e:
-            # Course files may be restricted even if modules are accessible
             if "403" in str(e) or "Forbidden" in str(e):
                 self.console.print("[yellow]Course files not accessible (restricted by instructor)[/yellow]")
                 self.console.print("[dim]Files from modules were still downloaded above[/dim]")
@@ -288,7 +274,6 @@ class CourseDownloader:
         files_dir.mkdir(parents=True, exist_ok=True)
 
         def download_single_file(file_info: dict) -> None:
-            """Download a single file (for parallel execution)."""
             try:
                 file_id = file_info.get("id")
                 file_url = file_info.get("url")
@@ -296,7 +281,6 @@ class CourseDownloader:
                 title = file_info.get("display_name", filename)
                 dest = files_dir / sanitize_filename(filename)
 
-                # Skip if already downloaded (thread-safe check-and-mark)
                 if file_url and self._mark_file_downloaded(file_id):
                     self.api.download_file(file_url, dest)
                     self._add_downloaded_item(DownloadedItem(
@@ -334,18 +318,13 @@ class CourseDownloader:
 
         soup = BeautifulSoup(html_content, "html.parser")
 
-        # Find all links that point to Canvas files
         for link in soup.find_all("a", href=True):
             href = link["href"]
-
-            # Match Canvas file URLs (e.g., /courses/123/files/456 or full URLs)
             file_match = re.search(r"/files/(\d+)", href)
             if not file_match:
                 continue
 
             file_id = int(file_match.group(1))
-
-            # Skip if already downloaded (thread-safe check-and-mark)
             if not self._mark_file_downloaded(file_id):
                 continue
 
@@ -369,7 +348,6 @@ class CourseDownloader:
                     downloaded.append(dest)
 
             except Exception:
-                # File might not be accessible
                 link_text = link.get_text(strip=True) or f"file_{file_id}"
                 self._add_skipped_item(f"Linked file: {link_text}")
 

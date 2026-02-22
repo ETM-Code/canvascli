@@ -76,22 +76,18 @@ class PDFCombiner:
 
     def _prompt_for_selection(self, pdf_infos: list[PDFInfo]) -> list[PDFInfo]:
         """Prompt user to select which modules to include if there are large ones."""
-        # Group PDFs by module
         modules = self._group_by_module(pdf_infos)
 
-        # Separate large and small modules
         large_modules = {k: v for k, v in modules.items() if v.total_pages >= LARGE_MODULE_THRESHOLD}
         small_modules = {k: v for k, v in modules.items() if v.total_pages < LARGE_MODULE_THRESHOLD}
 
         if not large_modules:
-            return pdf_infos  # No large modules, include everything
+            return pdf_infos
 
         self.console.print(f"\n[yellow]Found {len(large_modules)} large modules (>{LARGE_MODULE_THRESHOLD} pages)[/yellow]")
 
-        # Build choices
         choices = []
 
-        # Add small modules as one group
         if small_modules:
             total_small_pages = sum(m.total_pages for m in small_modules.values())
             total_small_files = sum(len(m.pdfs) for m in small_modules.values())
@@ -101,7 +97,6 @@ class PDFCombiner:
                 checked=True,
             ))
 
-        # Add each large module individually (sorted by page count descending)
         for module_name in sorted(large_modules.keys(), key=lambda k: large_modules[k].total_pages, reverse=True):
             module_info = large_modules[module_name]
             display_name = module_name if module_name != "__files__" else "Course Files"
@@ -112,16 +107,14 @@ class PDFCombiner:
                 checked=True,
             ))
 
-        # Prompt user
         selected = questionary.checkbox(
             "Select which modules to include in combined document:",
             choices=choices,
         ).ask()
 
         if selected is None:
-            return pdf_infos  # User cancelled, include everything
+            return pdf_infos
 
-        # Build result list from selected modules
         result = []
 
         if "__small__" in selected:
@@ -137,14 +130,11 @@ class PDFCombiner:
     def _compute_page_hash(self, page) -> str:
         """Compute a hash for a PDF page to detect duplicates."""
         try:
-            # Extract text and basic content for hashing
             text = page.extract_text() or ""
-            # Also include mediabox dimensions for pages with same text but different layout
             mediabox = str(page.mediabox) if hasattr(page, 'mediabox') else ""
             content = f"{text}{mediabox}"
             return hashlib.md5(content.encode('utf-8', errors='ignore')).hexdigest()
         except Exception:
-            # If we can't hash, use a unique placeholder
             return f"unhashable_{id(page)}"
 
     def _remove_duplicate_pages(self, writer: PdfWriter) -> int:
@@ -162,7 +152,6 @@ class PDFCombiner:
                 duplicates += 1
 
         if duplicates > 0:
-            # Rebuild writer with only unique pages
             while len(writer.pages) > 0:
                 del writer.pages[0]
             for page in pages_to_keep:
@@ -180,10 +169,8 @@ class PDFCombiner:
         writer = PdfWriter()
         self._failed_pdfs = []
 
-        # Suppress pypdf warnings
         logging.getLogger("pypdf").setLevel(logging.ERROR)
 
-        # Get PDF info and check for large modules
         self.console.print("\n[dim]Analyzing PDFs...[/dim]")
         pdf_infos = self._get_pdf_info(converted_pdfs)
 
@@ -191,14 +178,12 @@ class PDFCombiner:
             self.console.print("[yellow]No readable PDFs found[/yellow]")
             return None
 
-        # Prompt for selection if there are large modules
         selected_infos = self._prompt_for_selection(pdf_infos)
 
         if not selected_infos:
             self.console.print("[yellow]No PDFs selected[/yellow]")
             return None
 
-        # Sort for consistent ordering
         sorted_infos = sorted(selected_infos, key=lambda p: p.path.name.lower())
 
         self.console.print(f"\n[bold blue]Combining {len(sorted_infos)} PDFs...[/bold blue]")
@@ -214,7 +199,6 @@ class PDFCombiner:
 
             for pdf_info in sorted_infos:
                 try:
-                    # Use cached reader if available, otherwise create new one
                     reader = pdf_info.reader or PdfReader(str(pdf_info.path), strict=False)
                     for page in reader.pages:
                         writer.add_page(page)
@@ -224,11 +208,9 @@ class PDFCombiner:
 
                 progress.advance(task)
 
-        # Remove duplicate pages
         self.console.print("[dim]Checking for duplicate pages...[/dim]")
         duplicates_removed = self._remove_duplicate_pages(writer)
 
-        # Write combined PDF
         with open(output_path, "wb") as f:
             writer.write(f)
 
@@ -252,11 +234,10 @@ class PDFCombiner:
                     converted.path.unlink()
                     deleted += 1
             except Exception:
-                pass  # Silently skip files that can't be deleted
+                pass
 
         self.console.print(f"[green]Deleted {deleted} intermediate PDF files[/green]")
 
-        # Try to remove empty pdfs directory
         pdf_dir = self.output_dir / "pdfs"
         if pdf_dir.exists() and not any(pdf_dir.iterdir()):
             try:

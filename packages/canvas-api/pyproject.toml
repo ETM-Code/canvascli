@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "canvas-api"
+version = "0.1.0"
+description = "Canvas LMS API client library"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "ETM-Code" }
+]
+dependencies = [
+    "requests>=2.31.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["canvas_api"]

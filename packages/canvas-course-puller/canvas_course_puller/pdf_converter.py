@@ -1,6 +1,5 @@
 """Convert various file types to PDF."""
 
-import io
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -10,7 +9,7 @@ from PIL import Image
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
-from .downloader import DownloadedItem
+from .downloader import DownloadedItem, sanitize_filename
 
 
 @dataclass
@@ -41,14 +40,12 @@ class PDFConverter:
         """Check which conversion tools are available."""
         deps = {}
 
-        # Check weasyprint
         try:
             from weasyprint import HTML
             deps["weasyprint"] = True
         except ImportError:
             deps["weasyprint"] = False
 
-        # Check LibreOffice
         try:
             result = subprocess.run(
                 ["soffice", "--version"],
@@ -97,13 +94,10 @@ class PDFConverter:
 
         suffix = item.source_path.suffix.lower()
 
-        # Create unique PDF name from relative path to avoid collisions
-        from .downloader import sanitize_filename
         try:
             relative = item.source_path.relative_to(self.output_dir)
             safe_name = sanitize_filename(str(relative.with_suffix("")).replace("/", "_").replace("\\", "_"))
         except ValueError:
-            # Fallback if path is not relative to output_dir
             safe_name = item.source_path.stem
             if item.module_name:
                 safe_name = f"{sanitize_filename(item.module_name)}_{safe_name}"
@@ -112,7 +106,6 @@ class PDFConverter:
 
         try:
             if suffix == PDF_EXTENSION:
-                # Already a PDF, just copy
                 import shutil
                 shutil.copy(item.source_path, pdf_path)
                 return pdf_path
@@ -131,7 +124,6 @@ class PDFConverter:
                 return None
 
             elif suffix in TEXT_EXTENSIONS:
-                # Convert text to HTML then to PDF
                 return self._convert_text_to_pdf(item.source_path, pdf_path, deps)
 
         except Exception as e:
@@ -153,10 +145,8 @@ class PDFConverter:
         """Convert image to PDF using Pillow."""
         try:
             with Image.open(image_path) as img:
-                # Convert to RGB if necessary (for PNG with transparency)
                 if img.mode in ("RGBA", "P"):
                     img = img.convert("RGB")
-
                 img.save(str(pdf_path), "PDF", resolution=100.0)
             return pdf_path
         except Exception as e:
@@ -182,7 +172,6 @@ class PDFConverter:
                 if result.returncode != 0:
                     return None
 
-                # Find the generated PDF
                 temp_pdf = Path(temp_dir) / f"{office_path.stem}.pdf"
                 if temp_pdf.exists():
                     import shutil
@@ -204,7 +193,6 @@ class PDFConverter:
             content = text_path.read_text(encoding="utf-8", errors="replace")
             escaped_content = html.escape(content)
 
-            # Create HTML with proper formatting for code/text
             html_content = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -241,7 +229,6 @@ class PDFConverter:
 </body>
 </html>"""
 
-            # Write temp HTML and convert
             with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False, encoding="utf-8") as f:
                 f.write(html_content)
                 temp_html = Path(f.name)
