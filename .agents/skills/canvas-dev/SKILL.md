@@ -1,196 +1,130 @@
 ---
-name: canvas-dev
-description: Develop, extend, and debug the Canvas CLI tools (canvascli, canvas-course-puller, canvas-api). Use when adding new CLI commands, extending the Canvas API client, fixing bugs, or understanding the codebase architecture.
+name: canvas
+description: Interact with Canvas LMS from the terminal. Use when the user wants to check assignments, view grades, list courses, read announcements, download course content, view discussions, check quizzes, see todo items, or do anything related to their university Canvas account.
 ---
 
-# Canvas CLI Tools — Development Skill
+# Canvas CLI
 
-## Project Overview
+Two tools for Canvas LMS are installed globally on this machine:
 
-This is a **uv workspace monorepo** with three Python packages for interacting with Canvas LMS:
+- `canvascli` — full CLI for browsing Canvas (courses, assignments, grades, files, etc.)
+- `canvas-course-puller` — interactive bulk course downloader with PDF conversion
 
-| Package | Path | Purpose | Entry Point |
-|---------|------|---------|-------------|
-| `canvas-api` | `packages/canvas-api/` | Shared API client library | imported as `canvas_api` |
-| `canvascli` | `packages/canvascli/` | Full CLI (click-based, 13 command groups) | `canvascli` |
-| `canvas-course-puller` | `packages/canvas-course-puller/` | Interactive bulk course downloader | `canvas-course-puller` |
+## Authentication
 
-Python 3.11+. Package manager: `uv`. Build backend: `hatchling`.
+Already configured at `~/.config/canvascli/config`. To reconfigure:
 
-## Architecture
-
-```
-packages/
-├── canvas-api/canvas_api/
-│   ├── client.py          # CanvasAPI class — all HTTP methods + Canvas endpoints
-│   └── config.py          # load_config, save_config, get_canvas_client
-│
-├── canvascli/canvascli/
-│   ├── cli.py             # Root click group (@click.group), registers all commands
-│   ├── context.py         # CanvasContext (shared state), pass_context decorator
-│   ├── output.py          # output_table, output_detail, format_date, truncate
-│   ├── confirm.py         # confirm_action — required for all mutating operations
-│   └── commands/
-│       ├── auth.py        # login (deep-link), status, logout
-│       ├── courses.py     # list, view
-│       ├── modules.py     # list, view
-│       ├── assignments.py # list, view, submit [CONFIRM]
-│       ├── files.py       # list, download, upload [CONFIRM]
-│       ├── pages.py       # list, view (renders HTML via html2text)
-│       ├── grades.py      # list (enrollments + submissions)
-│       ├── announcements.py # list, view
-│       ├── discussions.py # list, view, reply [CONFIRM]
-│       ├── quizzes.py     # list, view
-│       ├── todo.py        # single command (no subgroup)
-│       ├── calendar.py    # single command (no subgroup)
-│       └── pull.py        # wraps canvas-course-puller for non-interactive bulk download
-│
-└── canvas-course-puller/canvas_course_puller/
-    ├── cli.py             # Interactive questionary-based UI
-    ├── downloader.py      # CourseDownloader — parallel downloads (8 threads)
-    ├── pdf_converter.py   # PDFConverter — HTML/image/Office/text → PDF
-    └── pdf_combiner.py    # PDFCombiner — merge + deduplicate pages
-```
-
-## Key Patterns
-
-### Adding a New CLI Command
-
-1. **Add API method** in `packages/canvas-api/canvas_api/client.py`:
-   ```python
-   def get_new_thing(self, course_id: int) -> list[dict]:
-       return self._get_paginated(f"courses/{course_id}/new_things")
-   ```
-
-2. **Create command file** at `packages/canvascli/canvascli/commands/new_thing.py`:
-   ```python
-   import click
-   from ..context import pass_context
-   from ..output import output_table, format_date
-
-   @click.group()
-   def new_thing():
-       """Description for help text."""
-       pass
-
-   @new_thing.command("list")
-   @click.option("--course", "course_id", type=int, default=None)
-   @pass_context
-   def list_items(ctx, course_id):
-       api = ctx.require_auth()
-       cid = course_id or ctx.require_course()
-       data = api.get_new_thing(cid)
-       # Format and display...
-       output_table(rows, columns, ctx)
-   ```
-
-3. **Register** in `packages/canvascli/canvascli/cli.py` inside `register_commands()`:
-   ```python
-   from .commands import new_thing
-   cli.add_command(new_thing.new_thing)
-   ```
-
-4. **Rebuild**: `uv sync --all-packages`
-
-### Command Conventions
-
-- **Read-only commands** (list, view, download): no confirmation needed
-- **Mutating commands** (submit, upload, reply, delete): MUST use `confirm_action()` from `confirm.py`
-- Every command that needs a course uses `@click.option("--course", ...)` AND checks `ctx.require_course()` as fallback to the global `--course` flag
-- Every command starts with `api = ctx.require_auth()` to get the authenticated API client
-- Support `--json` output: use `output_table()` / `output_detail()` which check `ctx.json_output`
-- HTML content from Canvas should be rendered via `html2text` for terminal display
-
-### CanvasAPI Client Pattern
-
-```python
-# GET single item
-def get_thing(self, id: int) -> dict:
-    return self._get(f"things/{id}")
-
-# GET paginated list
-def get_things(self, course_id: int) -> list[dict]:
-    return self._get_paginated(f"courses/{course_id}/things")
-
-# POST (create)
-def create_thing(self, course_id: int, data: str) -> dict:
-    return self._post(f"courses/{course_id}/things", json_data={"data": data})
-
-# File upload (multi-step: request URL → upload → confirm)
-# See submit_assignment() or upload_file() for the pattern
-```
-
-Available HTTP methods: `_get`, `_get_paginated`, `_post`, `_put`, `_delete`.
-All handle auth headers, timeouts, and JSON parsing automatically.
-
-### Canvas API Reference
-
-Base URL pattern: `{canvas_url}/api/v1/{endpoint}`
-Auth: Bearer token in Authorization header.
-Pagination: Link header with `rel="next"`. Handled by `_get_paginated()`.
-Canvas API docs: `https://canvas.instructure.com/doc/api/`
-
-### Output Helpers
-
-| Function | Use |
-|----------|-----|
-| `output_table(rows, columns, ctx)` | List data as rich table or JSON |
-| `output_detail(data, fields, ctx)` | Single item as key-value panel or JSON |
-| `format_date(iso_string)` | ISO → "Feb 22, 2026 11:59 PM" |
-| `truncate(text, max_len)` | Truncate with ellipsis |
-| `console` (from output.py) | Rich Console instance for direct printing |
-
-### Configuration
-
-Credentials stored at `~/.config/canvascli/config` as key=value:
-```
-CANVAS_URL=https://canvas.university.edu
-CANVAS_TOKEN=your-token-here
-```
-Also reads `CANVAS_URL` and `CANVAS_TOKEN` environment variables as fallback.
-
-### Circular Import Prevention
-
-`cli.py` imports commands inside `register_commands()` (called after `cli` group is defined).
-Commands import `pass_context` and `CanvasContext` from `context.py`, NOT from `cli.py`.
-
-## Common Tasks
-
-### Run the CLI
 ```bash
-uv run canvascli --help
-uv run canvascli courses list
-uv run canvascli --json --course 12345 assignments list
+canvascli auth login    # Opens browser to Canvas token page
+canvascli auth status   # Check current connection
+canvascli auth logout   # Remove credentials
 ```
 
-### Run the course puller
+## Quick Reference
+
+### Courses
+
 ```bash
-uv run canvas-course-puller
+canvascli courses list                   # All courses (favorites marked with *)
+canvascli courses list --favorites       # Favorites only
+canvascli courses view 12345             # Course details
 ```
 
-### Sync after changes
+### Assignments
+
 ```bash
-uv sync --all-packages
+canvascli --course 12345 assignments list          # List with due dates & status
+canvascli --course 12345 assignments view 67890    # Full details + description
+canvascli --course 12345 assignments submit 67890 --file ./hw.pdf   # Submit (asks confirmation)
 ```
 
-### Test a specific API call
-```python
-from canvas_api import get_canvas_client
-api = get_canvas_client()
-print(api.get_courses())
+### Grades
+
+```bash
+canvascli --course 12345 grades list     # Course grade + per-assignment scores
 ```
 
-## Dependencies
+### Files
 
-| Package | canvas-api | canvascli | canvas-course-puller |
-|---------|-----------|-----------|---------------------|
-| requests | x | | |
-| click | | x | |
-| rich | | x | x |
-| rich-click | | x | |
-| html2text | | x | |
-| questionary | | | x |
-| weasyprint | | | x |
-| pypdf | | | x |
-| Pillow | | | x |
-| beautifulsoup4 | | | x |
+```bash
+canvascli --course 12345 files list              # List course files
+canvascli files download 99999                   # Download a file by ID
+canvascli files download 99999 -o ./myfile.pdf   # Download to specific path
+canvascli --course 12345 files upload --file ./notes.pdf   # Upload (asks confirmation)
+```
+
+### Pages
+
+```bash
+canvascli --course 12345 pages list              # List wiki pages
+canvascli --course 12345 pages view page-slug    # Read page content in terminal
+```
+
+### Modules
+
+```bash
+canvascli --course 12345 modules list            # List modules
+canvascli --course 12345 modules view 11111      # View items in a module
+```
+
+### Announcements
+
+```bash
+canvascli --course 12345 announcements list      # List announcements
+canvascli --course 12345 announcements view 222  # Read full announcement
+```
+
+### Discussions
+
+```bash
+canvascli --course 12345 discussions list                          # List topics
+canvascli --course 12345 discussions view 333                      # View with replies
+canvascli --course 12345 discussions reply 333 -m "My reply"       # Post reply (asks confirmation)
+```
+
+### Quizzes
+
+```bash
+canvascli --course 12345 quizzes list            # List quizzes
+canvascli --course 12345 quizzes view 444        # Quiz details (due date, time limit, etc.)
+```
+
+### Todo & Calendar
+
+```bash
+canvascli todo                           # All pending todo items across courses
+canvascli calendar                       # Next 14 days of events
+canvascli calendar --days 30             # Next 30 days
+```
+
+### Bulk Download
+
+```bash
+canvascli --course 12345 pull                       # Download entire course
+canvascli --course 12345 pull -o ./archive          # Custom output directory
+canvascli --course 12345 pull --no-pdf              # Download only, skip PDF conversion
+canvascli --course 12345 pull --no-combine          # Convert but don't merge into single PDF
+canvas-course-puller                                # Interactive mode with course picker
+```
+
+## Global Options
+
+| Flag | Effect |
+|------|--------|
+| `--json` | Output as JSON instead of tables (for scripting/piping) |
+| `--course ID` | Set course context for all subcommands |
+| `--version` | Show version |
+
+The `--course` flag can be set globally or per-subcommand:
+```bash
+canvascli --course 12345 assignments list    # Global
+canvascli assignments list --course 12345    # Per-command (same result)
+```
+
+## Tips
+
+- Run `canvascli courses list` first to find course IDs
+- Use `--json` to pipe output to `jq` or other tools: `canvascli --json todo | jq '.[] | .title'`
+- Mutating actions (submit, upload, reply) always ask for confirmation before executing
+- `canvas-course-puller` is better for bulk archiving whole courses interactively
+- `canvascli pull` is better for scripted/non-interactive bulk downloads
