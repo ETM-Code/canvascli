@@ -1,6 +1,7 @@
 """Download content from Canvas courses."""
 
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,9 @@ from canvas_api import CanvasAPI
 
 # Number of parallel download threads
 MAX_WORKERS = 8
+MODULE_FETCH_WORKERS = 4
+MAX_RETRIES = 3
+BASE_RETRY_DELAY_SECONDS = 0.75
 
 
 @dataclass
@@ -73,6 +77,40 @@ class CourseDownloader:
             self._downloaded_file_ids.add(file_id)
             return True
 
+    def _is_retryable_error(self, exc: Exception) -> bool:
+        """Detect whether an error is likely transient."""
+        message = str(exc).lower()
+        retryable_markers = (
+            "429",
+            "too many requests",
+            "rate limit",
+            "timed out",
+            "timeout",
+            "temporarily unavailable",
+            "connection reset",
+            "connection aborted",
+            "service unavailable",
+            "bad gateway",
+            "gateway timeout",
+        )
+        return any(marker in message for marker in retryable_markers)
+
+    def _run_with_retries(self, fn, *args, **kwargs):
+        """Run a callable with exponential backoff for transient failures."""
+        last_error: Exception | None = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as e:
+                last_error = e
+                if attempt == MAX_RETRIES or not self._is_retryable_error(e):
+                    break
+                time.sleep(BASE_RETRY_DELAY_SECONDS * (2 ** (attempt - 1)))
+
+        if last_error:
+            raise last_error
+        raise RuntimeError("Unknown retry failure")
+
     def download_all(self) -> list[DownloadedItem]:
         """Download all content from modules and files."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -91,7 +129,7 @@ class CourseDownloader:
     def _download_modules(self) -> None:
         """Download content from all modules in parallel."""
         self.console.print("\n[bold blue]Fetching modules...[/bold blue]")
-        modules = self.api.get_modules(self.course_id, include_items=True)
+        modules = self._run_with_retries(self.api.get_modules, self.course_id, include_items=True)
 
         if not modules:
             self.console.print("[yellow]No modules found[/yellow]")
@@ -99,14 +137,24 @@ class CourseDownloader:
 
         self.console.print(f"Found {len(modules)} modules")
 
-        all_items = []
-        for module in modules:
+        all_items: list[tuple[dict, str]] = []
+
+        def expand_module(module: dict) -> list[tuple[dict, str]]:
             module_name = module.get("name", "Untitled Module")
             items = module.get("items", [])
             if not items:
-                items = self.api.get_module_items(self.course_id, module["id"])
-            for item in items:
-                all_items.append((item, module_name))
+                module_id = module.get("id")
+                if module_id:
+                    items = self._run_with_retries(self.api.get_module_items, self.course_id, module_id)
+            return [(item, module_name) for item in items]
+
+        with ThreadPoolExecutor(max_workers=min(MODULE_FETCH_WORKERS, len(modules))) as executor:
+            futures = [executor.submit(expand_module, module) for module in modules]
+            for future in as_completed(futures):
+                try:
+                    all_items.extend(future.result())
+                except Exception:
+                    continue
 
         if not all_items:
             self.console.print("[yellow]No items in modules[/yellow]")
@@ -144,7 +192,7 @@ class CourseDownloader:
 
         try:
             if item_type == "File" and content_id:
-                file_info = self.api.get_file(content_id)
+                file_info = self._run_with_retries(self.api.get_file, content_id)
                 file_id = file_info.get("id")
                 file_url = file_info.get("url")
                 filename = file_info.get("filename", f"{safe_title}.bin")
@@ -152,7 +200,7 @@ class CourseDownloader:
 
                 if file_url and self._mark_file_downloaded(file_id):
                     dest.parent.mkdir(parents=True, exist_ok=True)
-                    self.api.download_file(file_url, dest)
+                    self._run_with_retries(self.api.download_file, file_url, dest)
                     self._add_downloaded_item(DownloadedItem(
                         title=title,
                         item_type="File",
@@ -166,7 +214,7 @@ class CourseDownloader:
             elif item_type == "Page":
                 page_url = item.get("page_url")
                 if page_url:
-                    page = self.api.get_page(self.course_id, page_url)
+                    page = self._run_with_retries(self.api.get_page, self.course_id, page_url)
                     page_body = page.get("body", "")
                     page_title = page.get("title", title)
 
@@ -187,7 +235,7 @@ class CourseDownloader:
                     ))
 
             elif item_type == "Assignment" and content_id:
-                assignment = self.api.get_assignment(self.course_id, content_id)
+                assignment = self._run_with_retries(self.api.get_assignment, self.course_id, content_id)
                 html_content = self._format_assignment_html(assignment)
                 dest = module_dir / f"{safe_title}.html"
                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -201,7 +249,7 @@ class CourseDownloader:
                 ))
 
             elif item_type == "Discussion" and content_id:
-                discussion = self.api.get_discussion(self.course_id, content_id)
+                discussion = self._run_with_retries(self.api.get_discussion, self.course_id, content_id)
                 html_content = self._format_discussion_html(discussion)
                 dest = module_dir / f"{safe_title}.html"
                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -216,7 +264,7 @@ class CourseDownloader:
 
             elif item_type == "Quiz" and content_id:
                 try:
-                    quiz = self.api.get_quiz(self.course_id, content_id)
+                    quiz = self._run_with_retries(self.api.get_quiz, self.course_id, content_id)
                     html_content = self._format_quiz_html(quiz)
                     dest = module_dir / f"{safe_title}.html"
                     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -256,7 +304,7 @@ class CourseDownloader:
         self.console.print("\n[bold blue]Fetching course files...[/bold blue]")
 
         try:
-            files = self.api.get_files(self.course_id)
+            files = self._run_with_retries(self.api.get_files, self.course_id)
         except Exception as e:
             if "403" in str(e) or "Forbidden" in str(e):
                 self.console.print("[yellow]Course files not accessible (restricted by instructor)[/yellow]")
@@ -282,7 +330,7 @@ class CourseDownloader:
                 dest = files_dir / sanitize_filename(filename)
 
                 if file_url and self._mark_file_downloaded(file_id):
-                    self.api.download_file(file_url, dest)
+                    self._run_with_retries(self.api.download_file, file_url, dest)
                     self._add_downloaded_item(DownloadedItem(
                         title=title,
                         item_type="File",
@@ -329,14 +377,14 @@ class CourseDownloader:
                 continue
 
             try:
-                file_info = self.api.get_file(file_id)
+                file_info = self._run_with_retries(self.api.get_file, file_id)
                 file_url = file_info.get("url")
                 filename = file_info.get("filename", f"file_{file_id}")
 
                 if file_url:
                     dest = dest_dir / sanitize_filename(filename)
                     dest.parent.mkdir(parents=True, exist_ok=True)
-                    self.api.download_file(file_url, dest)
+                    self._run_with_retries(self.api.download_file, file_url, dest)
 
                     self._add_downloaded_item(DownloadedItem(
                         title=file_info.get("display_name", filename),

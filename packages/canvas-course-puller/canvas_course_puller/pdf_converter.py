@@ -1,9 +1,13 @@
 """Convert various file types to PDF."""
 
+import os
 import subprocess
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Semaphore
 
 from PIL import Image
 from rich.console import Console
@@ -25,6 +29,11 @@ OFFICE_EXTENSIONS = {".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt", 
 HTML_EXTENSIONS = {".html", ".htm"}
 TEXT_EXTENSIONS = {".txt", ".md", ".py", ".js", ".css", ".json", ".xml", ".csv"}
 PDF_EXTENSION = ".pdf"
+DEFAULT_MAX_WORKERS = 4
+MAX_WORKERS_CAP = 8
+MAX_RETRIES = 3
+BASE_RETRY_DELAY_SECONDS = 0.75
+MAX_CONCURRENT_OFFICE_CONVERSIONS = 2
 
 class PDFConverter:
     """Converts various file types to PDF."""
@@ -35,6 +44,7 @@ class PDFConverter:
         self.console = Console()
         self._weasyprint_available = None
         self._libreoffice_available = None
+        self._office_semaphore = Semaphore(MAX_CONCURRENT_OFFICE_CONVERSIONS)
 
     def check_dependencies(self) -> dict[str, bool]:
         """Check which conversion tools are available."""
@@ -60,14 +70,20 @@ class PDFConverter:
 
     def convert_all(self, items: list[DownloadedItem]) -> list[ConvertedPDF]:
         """Convert all items to PDF."""
+        if not items:
+            return []
+
         self.pdf_dir.mkdir(parents=True, exist_ok=True)
-        converted_pdfs = []
+        converted_pdfs: list[ConvertedPDF] = []
+        failed_conversions: list[str] = []
 
         deps = self.check_dependencies()
         if not deps.get("weasyprint"):
             self.console.print("[yellow]Warning: weasyprint not available, HTML conversion may fail[/yellow]")
         if not deps.get("libreoffice"):
             self.console.print("[yellow]Warning: LibreOffice not available, Office document conversion will be skipped[/yellow]")
+
+        max_workers = self._determine_max_workers(len(items))
 
         with Progress(
             SpinnerColumn(),
@@ -78,14 +94,89 @@ class PDFConverter:
         ) as progress:
             task = progress.add_task("Converting to PDF", total=len(items))
 
-            for item in items:
-                pdf_path = self._convert_item(item, deps)
-                if pdf_path:
-                    converted_pdfs.append(ConvertedPDF(path=pdf_path, module_name=item.module_name))
-                progress.advance(task)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(self._convert_item_with_retries, item, deps): item
+                    for item in items
+                }
+
+                for future in as_completed(futures):
+                    item = futures[future]
+                    pdf_path: Path | None = None
+                    error: str | None = None
+                    source_name = item.source_path.name if item.source_path else item.title
+
+                    try:
+                        pdf_path, error = future.result()
+                    except Exception as e:
+                        error = str(e)
+
+                    if pdf_path:
+                        converted_pdfs.append(ConvertedPDF(path=pdf_path, module_name=item.module_name))
+                    elif error:
+                        failed_conversions.append(f"{source_name}: {error}")
+
+                    progress.advance(task)
 
         self.console.print(f"\n[green]Converted {len(converted_pdfs)} items to PDF[/green]")
+        if failed_conversions:
+            self.console.print(
+                f"[yellow]Failed to convert {len(failed_conversions)} items.[/yellow]"
+            )
+            for failure in failed_conversions[:5]:
+                self.console.print(f"[dim]- {failure}[/dim]")
+            if len(failed_conversions) > 5:
+                self.console.print(f"[dim]...and {len(failed_conversions) - 5} more[/dim]")
+
         return converted_pdfs
+
+    def _determine_max_workers(self, item_count: int) -> int:
+        """Choose a safe amount of parallelism for conversions."""
+        cpu_count = os.cpu_count() or DEFAULT_MAX_WORKERS
+        target = max(1, min(cpu_count - 1, DEFAULT_MAX_WORKERS))
+        workers = min(MAX_WORKERS_CAP, target, item_count)
+        return max(1, workers)
+
+    def _is_retryable_error(self, exc: Exception) -> bool:
+        """Detect transient errors worth retrying."""
+        if isinstance(exc, (subprocess.TimeoutExpired, TimeoutError, MemoryError, OSError)):
+            return True
+
+        msg = str(exc).lower()
+        retryable_fragments = (
+            "429",
+            "too many requests",
+            "rate limit",
+            "temporarily unavailable",
+            "timeout",
+            "timed out",
+            "memory",
+            "cannot allocate",
+            "resource busy",
+            "broken pipe",
+        )
+        return any(fragment in msg for fragment in retryable_fragments)
+
+    def _convert_item_with_retries(
+        self, item: DownloadedItem, deps: dict[str, bool]
+    ) -> tuple[Path | None, str | None]:
+        """Convert one item with bounded retries for transient errors."""
+        last_error: Exception | None = None
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                return self._convert_item(item, deps), None
+            except Exception as e:
+                last_error = e
+                if attempt == MAX_RETRIES or not self._is_retryable_error(e):
+                    break
+
+                sleep_seconds = BASE_RETRY_DELAY_SECONDS * (2 ** (attempt - 1))
+                time.sleep(sleep_seconds)
+
+        if last_error:
+            return None, str(last_error)
+        return None, "Unknown conversion error"
 
     def _convert_item(self, item: DownloadedItem, deps: dict[str, bool]) -> Path | None:
         """Convert a single item to PDF."""
@@ -104,58 +195,47 @@ class PDFConverter:
 
         pdf_path = self.pdf_dir / f"{safe_name}.pdf"
 
-        try:
-            if suffix == PDF_EXTENSION:
-                import shutil
-                shutil.copy(item.source_path, pdf_path)
-                return pdf_path
+        if suffix == PDF_EXTENSION:
+            import shutil
+            shutil.copy(item.source_path, pdf_path)
+            return pdf_path
 
-            elif suffix in HTML_EXTENSIONS:
-                if deps.get("weasyprint"):
-                    return self._convert_html_to_pdf(item.source_path, pdf_path)
-                return None
+        if suffix in HTML_EXTENSIONS:
+            if deps.get("weasyprint"):
+                return self._convert_html_to_pdf(item.source_path, pdf_path)
+            return None
 
-            elif suffix in IMAGE_EXTENSIONS:
-                return self._convert_image_to_pdf(item.source_path, pdf_path)
+        if suffix in IMAGE_EXTENSIONS:
+            return self._convert_image_to_pdf(item.source_path, pdf_path)
 
-            elif suffix in OFFICE_EXTENSIONS:
-                if deps.get("libreoffice"):
-                    return self._convert_office_to_pdf(item.source_path, pdf_path)
-                return None
+        if suffix in OFFICE_EXTENSIONS:
+            if deps.get("libreoffice"):
+                return self._convert_office_to_pdf(item.source_path, pdf_path)
+            return None
 
-            elif suffix in TEXT_EXTENSIONS:
-                return self._convert_text_to_pdf(item.source_path, pdf_path, deps)
-
-        except Exception as e:
-            self.console.print(f"[red]Error converting {item.source_path.name}: {e}[/red]")
+        if suffix in TEXT_EXTENSIONS:
+            return self._convert_text_to_pdf(item.source_path, pdf_path, deps)
 
         return None
 
     def _convert_html_to_pdf(self, html_path: Path, pdf_path: Path) -> Path | None:
         """Convert HTML to PDF using weasyprint."""
-        try:
-            from weasyprint import HTML
-            HTML(filename=str(html_path)).write_pdf(str(pdf_path))
-            return pdf_path
-        except Exception as e:
-            self.console.print(f"[red]HTML conversion failed: {e}[/red]")
-            return None
+        from weasyprint import HTML
+
+        HTML(filename=str(html_path)).write_pdf(str(pdf_path))
+        return pdf_path
 
     def _convert_image_to_pdf(self, image_path: Path, pdf_path: Path) -> Path | None:
         """Convert image to PDF using Pillow."""
-        try:
-            with Image.open(image_path) as img:
-                if img.mode in ("RGBA", "P"):
-                    img = img.convert("RGB")
-                img.save(str(pdf_path), "PDF", resolution=100.0)
-            return pdf_path
-        except Exception as e:
-            self.console.print(f"[red]Image conversion failed: {e}[/red]")
-            return None
+        with Image.open(image_path) as img:
+            if img.mode in ("RGBA", "P"):
+                img = img.convert("RGB")
+            img.save(str(pdf_path), "PDF", resolution=100.0)
+        return pdf_path
 
     def _convert_office_to_pdf(self, office_path: Path, pdf_path: Path) -> Path | None:
         """Convert Office document to PDF using LibreOffice."""
-        try:
+        with self._office_semaphore:
             with tempfile.TemporaryDirectory() as temp_dir:
                 result = subprocess.run(
                     [
@@ -170,7 +250,8 @@ class PDFConverter:
                 )
 
                 if result.returncode != 0:
-                    return None
+                    stderr = result.stderr.decode("utf-8", errors="replace").strip()
+                    raise RuntimeError(stderr or "LibreOffice conversion failed")
 
                 temp_pdf = Path(temp_dir) / f"{office_path.stem}.pdf"
                 if temp_pdf.exists():
@@ -178,22 +259,18 @@ class PDFConverter:
                     shutil.move(str(temp_pdf), str(pdf_path))
                     return pdf_path
 
-        except Exception as e:
-            self.console.print(f"[red]Office conversion failed: {e}[/red]")
-
-        return None
+        raise RuntimeError(f"Converted PDF not found for {office_path.name}")
 
     def _convert_text_to_pdf(self, text_path: Path, pdf_path: Path, deps: dict[str, bool]) -> Path | None:
         """Convert text file to PDF via HTML."""
         if not deps.get("weasyprint"):
             return None
 
-        try:
-            import html
-            content = text_path.read_text(encoding="utf-8", errors="replace")
-            escaped_content = html.escape(content)
+        import html
+        content = text_path.read_text(encoding="utf-8", errors="replace")
+        escaped_content = html.escape(content)
 
-            html_content = f"""<!DOCTYPE html>
+        html_content = f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -229,18 +306,14 @@ class PDFConverter:
 </body>
 </html>"""
 
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False, encoding="utf-8") as f:
-                f.write(html_content)
-                temp_html = Path(f.name)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False, encoding="utf-8") as f:
+            f.write(html_content)
+            temp_html = Path(f.name)
 
-            try:
-                from weasyprint import HTML
-                HTML(filename=str(temp_html)).write_pdf(str(pdf_path))
-                return pdf_path
-            finally:
-                temp_html.unlink(missing_ok=True)
+        try:
+            from weasyprint import HTML
 
-        except Exception as e:
-            self.console.print(f"[red]Text conversion failed: {e}[/red]")
-
-        return None
+            HTML(filename=str(temp_html)).write_pdf(str(pdf_path))
+            return pdf_path
+        finally:
+            temp_html.unlink(missing_ok=True)

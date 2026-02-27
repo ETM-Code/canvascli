@@ -2,6 +2,9 @@
 
 import hashlib
 import logging
+import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,6 +17,9 @@ from .pdf_converter import ConvertedPDF
 
 
 LARGE_MODULE_THRESHOLD = 300  # Pages
+MAX_ANALYZE_WORKERS = 8
+MAX_RETRIES = 3
+BASE_RETRY_DELAY_SECONDS = 0.5
 
 
 @dataclass
@@ -41,22 +47,59 @@ class PDFCombiner:
         self.console = Console()
         self._failed_pdfs: list[str] = []
 
+    def _is_retryable_error(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        retryable_markers = (
+            "timed out",
+            "timeout",
+            "temporarily unavailable",
+            "resource busy",
+            "cannot allocate",
+            "memory",
+        )
+        return isinstance(exc, (OSError, MemoryError)) or any(marker in message for marker in retryable_markers)
+
+    def _read_pdf_info(self, converted: ConvertedPDF) -> PDFInfo:
+        last_error: Exception | None = None
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                reader = PdfReader(str(converted.path), strict=False)
+                return PDFInfo(
+                    path=converted.path,
+                    pages=len(reader.pages),
+                    module_name=converted.module_name,
+                    reader=None,
+                )
+            except Exception as e:
+                last_error = e
+                if attempt == MAX_RETRIES or not self._is_retryable_error(e):
+                    break
+                time.sleep(BASE_RETRY_DELAY_SECONDS * (2 ** (attempt - 1)))
+
+        if last_error:
+            raise last_error
+        raise RuntimeError(f"Could not read PDF info for {converted.path.name}")
+
     def _get_pdf_info(self, converted_pdfs: list[ConvertedPDF]) -> list[PDFInfo]:
         """Get page counts for all PDFs."""
         logging.getLogger("pypdf").setLevel(logging.ERROR)
 
-        infos = []
-        for converted in converted_pdfs:
-            try:
-                reader = PdfReader(str(converted.path), strict=False)
-                infos.append(PDFInfo(
-                    path=converted.path,
-                    pages=len(reader.pages),
-                    module_name=converted.module_name,
-                    reader=reader,
-                ))
-            except Exception:
-                self._failed_pdfs.append(converted.path.name)
+        infos: list[PDFInfo] = []
+        max_workers = min(MAX_ANALYZE_WORKERS, max(1, (os.cpu_count() or 4)), len(converted_pdfs))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self._read_pdf_info, converted): converted
+                for converted in converted_pdfs
+            }
+            for future in as_completed(futures):
+                converted = futures[future]
+                try:
+                    infos.append(future.result())
+                except Exception:
+                    self._failed_pdfs.append(converted.path.name)
+
         return infos
 
     def _group_by_module(self, pdf_infos: list[PDFInfo]) -> dict[str, ModuleInfo]:
