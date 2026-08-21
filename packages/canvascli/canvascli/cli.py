@@ -26,7 +26,7 @@ def cli(ctx, json_output, course_id):
 def register_commands():
     """Register all command groups (called after cli is defined to avoid circular imports)."""
     from .commands import auth, courses, modules, assignments, files, pages, grades
-    from .commands import announcements, discussions, quizzes, todo, calendar, pull
+    from .commands import announcements, discussions, quizzes, todo, calendar, pull, setup
 
     cli.add_command(auth.auth)
     cli.add_command(courses.courses)
@@ -41,6 +41,7 @@ def register_commands():
     cli.add_command(todo.todo)
     cli.add_command(calendar.calendar_cmd, name="calendar")
     cli.add_command(pull.pull)
+    cli.add_command(setup.setup)
 
 
 register_commands()

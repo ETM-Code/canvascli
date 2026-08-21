@@ -1,5 +1,6 @@
 """Main CLI entry point for Canvas Course Puller."""
 
+import os
 import subprocess
 import sys
 import webbrowser
@@ -92,7 +93,8 @@ def configure_canvas() -> CanvasAPI | None:
                 "CANVAS_URL": canvas_url,
                 "CANVAS_TOKEN": access_token,
             })
-            console.print("[green]Configuration saved to ~/.config/canvascli/config[/green]")
+            from canvas_api import get_config_path
+            console.print(f"[green]Configuration saved to {get_config_path()}[/green]")
 
         return api
 
@@ -185,7 +187,24 @@ def select_output_directory() -> Path | None:
         return default_dir
 
     if choice == "choose":
-        try:
+        picked = _native_folder_picker()
+        if picked:
+            return picked
+        # Fallback to text prompt
+        custom_path = questionary.path(
+            "Enter output directory:",
+            only_directories=True,
+        ).ask()
+        if custom_path:
+            return Path(custom_path)
+
+    return None
+
+
+def _native_folder_picker() -> Path | None:
+    """Open a native folder picker dialog. Returns None on failure or cancel."""
+    try:
+        if sys.platform == "darwin":
             result = subprocess.run(
                 [
                     "osascript", "-e",
@@ -197,18 +216,34 @@ def select_output_directory() -> Path | None:
             )
             if result.returncode == 0 and result.stdout.strip():
                 return Path(result.stdout.strip())
-            else:
-                console.print("[yellow]No folder selected[/yellow]")
-                return None
-        except Exception as e:
-            console.print(f"[red]Could not open folder picker: {e}[/red]")
-            custom_path = questionary.path(
-                "Enter output directory:",
-                only_directories=True,
-            ).ask()
-            if custom_path:
-                return Path(custom_path)
-
+        elif sys.platform == "win32":
+            # Use PowerShell's folder browser dialog
+            ps_script = (
+                "Add-Type -AssemblyName System.Windows.Forms; "
+                "$f = New-Object System.Windows.Forms.FolderBrowserDialog; "
+                "$f.Description = 'Select output folder for Canvas download'; "
+                "if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath } else { '' }"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_script],
+                capture_output=True,
+                text=True,
+            )
+            path = result.stdout.strip()
+            if result.returncode == 0 and path:
+                return Path(path)
+        else:
+            # Linux: try zenity
+            result = subprocess.run(
+                ["zenity", "--file-selection", "--directory",
+                 "--title=Select output folder for Canvas download"],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return Path(result.stdout.strip())
+    except Exception:
+        pass
     return None
 
 
@@ -291,12 +326,25 @@ def run_download(api: CanvasAPI, course: dict, output_dir: Path):
     ))
 
     open_folder = questionary.confirm(
-        "Open folder in Finder?",
+        "Open output folder?",
         default=True,
     ).ask()
 
     if open_folder:
-        subprocess.run(["open", str(course_dir)])
+        _open_folder(course_dir)
+
+
+def _open_folder(path: Path) -> None:
+    """Open a folder in the platform's file manager."""
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.run(["open", str(path)])
+        else:
+            subprocess.run(["xdg-open", str(path)])
+    except Exception:
+        console.print(f"[dim]Could not open folder. Path: {path}[/dim]")
 
 
 def main():

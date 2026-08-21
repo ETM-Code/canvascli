@@ -1,14 +1,24 @@
 """Configuration management for Canvas API credentials."""
 
 import os
+import sys
 from pathlib import Path
 
 from .client import CanvasAPI
 
 
+def get_config_dir() -> Path:
+    """Get the platform-appropriate config directory."""
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return Path(appdata) / "canvascli"
+    return Path.home() / ".config" / "canvascli"
+
+
 def get_config_path() -> Path:
     """Get path to config file."""
-    config_dir = Path.home() / ".config" / "canvascli"
+    config_dir = get_config_dir()
     config_dir.mkdir(parents=True, exist_ok=True)
     return config_dir / "config"
 

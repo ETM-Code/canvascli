@@ -31,11 +31,22 @@ class DownloadedItem:
     module_name: str | None  # Which module this came from
 
 
+_WINDOWS_RESERVED = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+})
+
+
 def sanitize_filename(name: str) -> str:
-    """Convert a string to a safe filename."""
+    """Convert a string to a safe filename (cross-platform)."""
     name = re.sub(r'[<>:"/\\|?*]', '_', name)
     name = re.sub(r'\s+', ' ', name)
     name = name.strip('. ')
+    # Avoid Windows reserved device names
+    stem = name.split('.')[0].upper()
+    if stem in _WINDOWS_RESERVED:
+        name = f"_{name}"
     return name[:200]
 
 

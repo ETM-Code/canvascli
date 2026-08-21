@@ -1,6 +1,7 @@
 ---
 name: canvas
 description: Interact with Canvas LMS from the terminal. Use when the user wants to check assignments, view grades, list courses, read announcements, download course content, view discussions, check quizzes, see todo items, or do anything related to their university Canvas account.
+allowed-tools: Bash(canvascli:*), Bash(canvas-course-puller:*)
 ---
 
 # Canvas CLI

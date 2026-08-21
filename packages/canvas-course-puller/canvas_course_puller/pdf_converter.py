@@ -1,7 +1,9 @@
 """Convert various file types to PDF."""
 
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -35,6 +37,27 @@ MAX_RETRIES = 3
 BASE_RETRY_DELAY_SECONDS = 0.75
 MAX_CONCURRENT_OFFICE_CONVERSIONS = 2
 
+def _find_soffice() -> str | None:
+    """Find the LibreOffice soffice binary across platforms."""
+    # Check PATH first
+    if shutil.which("soffice"):
+        return "soffice"
+    # Common Windows install locations
+    if sys.platform == "win32":
+        for prog_dir in [os.environ.get("PROGRAMFILES", ""), os.environ.get("PROGRAMFILES(X86)", "")]:
+            if not prog_dir:
+                continue
+            candidate = Path(prog_dir) / "LibreOffice" / "program" / "soffice.exe"
+            if candidate.exists():
+                return str(candidate)
+    # macOS app bundle
+    if sys.platform == "darwin":
+        candidate = Path("/Applications/LibreOffice.app/Contents/MacOS/soffice")
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
 class PDFConverter:
     """Converts various file types to PDF."""
 
@@ -44,6 +67,7 @@ class PDFConverter:
         self.console = Console()
         self._weasyprint_available = None
         self._libreoffice_available = None
+        self._soffice_path: str | None = None
         self._office_semaphore = Semaphore(MAX_CONCURRENT_OFFICE_CONVERSIONS)
 
     def check_dependencies(self) -> dict[str, bool]:
@@ -56,14 +80,18 @@ class PDFConverter:
         except ImportError:
             deps["weasyprint"] = False
 
-        try:
-            result = subprocess.run(
-                ["soffice", "--version"],
-                capture_output=True,
-                timeout=5,
-            )
-            deps["libreoffice"] = result.returncode == 0
-        except (subprocess.TimeoutExpired, FileNotFoundError):
+        self._soffice_path = _find_soffice()
+        if self._soffice_path:
+            try:
+                result = subprocess.run(
+                    [self._soffice_path, "--version"],
+                    capture_output=True,
+                    timeout=5,
+                )
+                deps["libreoffice"] = result.returncode == 0
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                deps["libreoffice"] = False
+        else:
             deps["libreoffice"] = False
 
         return deps
@@ -196,7 +224,6 @@ class PDFConverter:
         pdf_path = self.pdf_dir / f"{safe_name}.pdf"
 
         if suffix == PDF_EXTENSION:
-            import shutil
             shutil.copy(item.source_path, pdf_path)
             return pdf_path
 
@@ -235,11 +262,12 @@ class PDFConverter:
 
     def _convert_office_to_pdf(self, office_path: Path, pdf_path: Path) -> Path | None:
         """Convert Office document to PDF using LibreOffice."""
+        soffice = self._soffice_path or "soffice"
         with self._office_semaphore:
             with tempfile.TemporaryDirectory() as temp_dir:
                 result = subprocess.run(
                     [
-                        "soffice",
+                        soffice,
                         "--headless",
                         "--convert-to", "pdf",
                         "--outdir", temp_dir,
@@ -255,7 +283,6 @@ class PDFConverter:
 
                 temp_pdf = Path(temp_dir) / f"{office_path.stem}.pdf"
                 if temp_pdf.exists():
-                    import shutil
                     shutil.move(str(temp_pdf), str(pdf_path))
                     return pdf_path
 
