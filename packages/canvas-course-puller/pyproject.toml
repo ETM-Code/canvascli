@@ -6,7 +6,6 @@ build-backend = "hatchling.build"
 name = "canvas-course-puller"
 version = "0.1.0"
 description = "Bulk download Canvas LMS courses and convert to PDF"
-readme = "../../README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [
